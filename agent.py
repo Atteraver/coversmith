@@ -1,6 +1,8 @@
 import os
+import re
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from framework import Agent, ExecutionTrace
 from framework.llm import LLMClient
@@ -69,19 +71,60 @@ def build_agent() -> Agent:
     )
 
 
+def _load_env():
+    """Auto-load .env from the coversmith directory (next to this file)."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def _parse_pr_url(url: str) -> tuple[str, int]:
+    """
+    Parse a GitHub PR URL into (owner/repo, pr_number).
+    Accepts:
+      https://github.tools.sap/MyOrg/my-service/pull/42
+      https://github.com/MyOrg/my-service/pull/42
+      MyOrg/my-service 42   (already split — not handled here)
+    """
+    m = re.search(r"[/:]([^/]+/[^/]+)/pull/(\d+)", url)
+    if not m:
+        raise ValueError(
+            f"Cannot parse PR URL: {url!r}\n"
+            "Expected format: https://github.tools.sap/owner/repo/pull/42"
+        )
+    return m.group(1), int(m.group(2))
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print("Usage: python agent.py <owner/repo> <pr_number> <sonar_component_key> [repo_path]")
+    _load_env()
+
+    if len(sys.argv) < 3:
+        print("Usage: coversmith <pr_url> <sonar_component_key> [maven_project_root]")
         print()
         print("Examples:")
-        print("  python agent.py MyOrg/my-service 42 MyOrg-my-service")
-        print("  python agent.py MyOrg/my-service 42 MyOrg-my-service /path/to/local/clone/srv")
+        print("  coversmith https://github.tools.sap/MyOrg/x-iep-service/pull/42 CALMRun-x-iep-service")
+        print("  coversmith https://github.tools.sap/MyOrg/x-iep-service/pull/42 CALMRun-x-iep-service /path/to/clone/srv")
         sys.exit(1)
 
-    repo = sys.argv[1]
-    pr_number = int(sys.argv[2])
-    sonar_key = sys.argv[3]
-    repo_path = sys.argv[4] if len(sys.argv) > 4 else os.getcwd()
+    pr_url = sys.argv[1]
+    sonar_key = sys.argv[2]
+    repo_path = sys.argv[3] if len(sys.argv) > 3 else os.getcwd()
+
+    try:
+        repo, pr_number = _parse_pr_url(pr_url)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
     agent = build_agent()
 

@@ -8,7 +8,7 @@ Autonomous Java test coverage agent built on the RuleSmith agent framework.
 
 ## How it works
 
-CoverSmith runs a free ReAct loop (no fixed pipeline). Given a PR number, it:
+CoverSmith runs a free ReAct loop (no fixed pipeline). Given a PR URL, it:
 
 1. Fetches the PR diff to find which source files changed
 2. Pulls open SonarQube issues for the PR
@@ -24,7 +24,7 @@ Two approval gates keep you in control: writing test files, and running mutation
 
 ### Persistent context files
 
-Because the agent uses a sliding window memory, long runs may evict earlier results. CoverSmith solves this by writing two temp files in the directory where you run it:
+Because the agent uses a sliding window memory, long runs may evict earlier results. CoverSmith solves this by writing two temp files in your working directory:
 
 | File | Contents |
 |------|----------|
@@ -35,80 +35,60 @@ These are updated by the agent and deleted by `cleanup_context()` at the end.
 
 ---
 
-## Setup
+## Setup (one time)
 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/your-org/coversmith.git ~/tools/coversmith
+git clone .../coversmith ~/tools/coversmith
 cd ~/tools/coversmith
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Set environment variables
-
-Copy `.env.example` to `.env` and fill in your values:
+### 2. Configure `.env`
 
 ```bash
-cp .env.example .env
+cp ~/tools/coversmith/.env.example ~/tools/coversmith/.env
+# edit .env — fill in HAI_BASE_URL and HAI_API_KEY
 ```
 
-```
-HAI_BASE_URL=https://your-hai-proxy/v1
-HAI_API_KEY=your-key
-HAI_MODEL=claude-sonnet-4-6
+`.env` is loaded automatically every run — no `source` or `export` needed.
 
-# Optional — only needed if SonarQube requires token auth beyond browser session
-SONAR_TOKEN=your-sonar-token
-SONAR_BASE_URL=https://sonar.tools.sap
-```
+### 3. Add to PATH
 
-Load them before running:
+Add to `~/.zshrc`:
 
 ```bash
-set -a && source .env && set +a
+export PATH="$HOME/tools/coversmith:$PATH"
 ```
+
+Then reload: `source ~/.zshrc`
 
 ---
 
-## Running from any repo
+## Usage
 
-You don't need to clone CoverSmith into your repo. Run it from anywhere — the temp context files land in your **current working directory**, so cd into your repo first:
-
-```bash
-# From your target repo
-cd /path/to/x-iep-service
-
-# Run CoverSmith
-python3 ~/tools/coversmith/agent.py \
-  MyOrg/x-iep-service \       # GitHub owner/repo
-  42 \                         # PR number
-  CALMRun-x-iep-service \      # SonarQube component key
-  srv                          # Maven submodule root (relative or absolute)
+```
+coversmith <pr_url> <sonar_component_key> [maven_project_root]
 ```
 
-Or with an absolute Maven path:
+**From any directory:**
 
 ```bash
-python3 ~/tools/coversmith/agent.py \
-  MyOrg/x-iep-service 42 CALMRun-x-iep-service \
-  /path/to/x-iep-service/srv
+coversmith https://github.tools.sap/MyOrg/x-iep-service/pull/42 CALMRun-x-iep-service
 ```
 
-### Shorthand alias (add to `~/.zshrc`)
+**With an explicit Maven root** (when tests live in a submodule like `srv/`):
 
 ```bash
-alias coversmith='python3 ~/tools/coversmith/agent.py'
+coversmith https://github.tools.sap/MyOrg/x-iep-service/pull/42 CALMRun-x-iep-service /path/to/x-iep-service/srv
 ```
 
-Then from any repo:
+If `maven_project_root` is omitted, it defaults to the current working directory.
 
-```bash
-cd /path/to/x-iep-service
-coversmith MyOrg/x-iep-service 42 CALMRun-x-iep-service srv
-```
+The PR URL is parsed automatically — no need to split repo and PR number manually.
 
 ---
 
@@ -117,10 +97,10 @@ coversmith MyOrg/x-iep-service 42 CALMRun-x-iep-service srv
 | Tool | Approval | Purpose |
 |------|----------|---------|
 | `fetch_pr_diff` | No | Gets diff + changed file list from GitHub |
-| `fetch_sonar_issues` | No | Pulls open issues from SonarQube, writes `.coversmith_issues.json` |
-| `fetch_uncovered_lines` | No | Gets exact uncovered lines per file, writes `.coversmith_uncovered.json` |
-| `read_uncovered_context` | No | Re-reads `.coversmith_uncovered.json` after window eviction |
-| `read_issues_context` | No | Re-reads `.coversmith_issues.json` after window eviction |
+| `fetch_sonar_issues` | No | Pulls open issues from SonarQube → `.coversmith_issues.json` |
+| `fetch_uncovered_lines` | No | Gets exact uncovered lines per file → `.coversmith_uncovered.json` |
+| `read_uncovered_context` | No | Re-reads uncovered lines file if evicted from memory |
+| `read_issues_context` | No | Re-reads issues file if evicted from memory |
 | `read_source_file` | No | Reads any Java source or test file |
 | `write_test_file` | **Yes** | Writes or overwrites a test file |
 | `run_tests` | No | Runs Maven + JaCoCo for a specific test class |
@@ -133,22 +113,26 @@ coversmith MyOrg/x-iep-service 42 CALMRun-x-iep-service srv
 
 ```
 coversmith/
-├── agent.py          ← entry point; system prompt + Agent wiring
-├── tools.py          ← all 10 tools registered on a ToolRegistry instance
-├── framework/        ← copied from RuleSmith (Agent, ToolRegistry, LLMClient, Memory, Tracer)
+├── coversmith        ← executable entry point (add to PATH)
+├── agent.py          ← system prompt + Agent wiring + URL parser + .env loader
+├── tools.py          ← all 10 tools on a ToolRegistry instance
+├── framework/        ← copied from RuleSmith (unchanged)
 ├── reports/          ← per-run markdown reports (gitignored)
-├── .env.example
+├── .env              ← your credentials (gitignored)
+├── .env.example      ← template
 └── requirements.txt
 ```
 
 ---
 
-## Environment variables reference
+## Environment variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `HAI_BASE_URL` | Yes | — | LLM proxy base URL |
 | `HAI_API_KEY` | Yes | — | API key |
 | `HAI_MODEL` | No | `claude-sonnet-4-6` | Model name |
-| `SONAR_TOKEN` | No | — | SonarQube token (Basic auth) |
+| `SONAR_TOKEN` | No | — | SonarQube token (if Basic auth required) |
 | `SONAR_BASE_URL` | No | `https://sonar.tools.sap` | SonarQube host |
+
+All values are read from `~/tools/coversmith/.env` automatically. Shell environment variables take precedence (existing `HAI_*` exports are not overwritten).

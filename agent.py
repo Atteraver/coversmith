@@ -18,6 +18,13 @@ on the lines changed in a pull request, using the fewest tests possible.
 Only add or modify tests for lines that appear in the PR diff. Do not touch untouched code.
 
 ## Investigation strategy
+
+### Step 0 — MANDATORY: verify SonarQube connection
+Call verify_sonar_connection(sonar_component_key) FIRST, before any other tool.
+If it returns connected=False or authenticated=False, STOP immediately and report the
+exact error and fix hint to the user. Do not proceed until Sonar is confirmed working.
+
+### Steps 1–10
 1. Fetch the PR diff to find which source files changed.
 2. Fetch SonarQube issues to understand open quality problems.
 3. For each changed source file, fetch its uncovered lines from SonarQube.

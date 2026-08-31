@@ -43,7 +43,125 @@ def _run(cmd: str, cwd: str = None) -> tuple[int, str, str]:
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
+# ── Shared Sonar HTTP helper ──────────────────────────────────────────────────
+
+def _sonar_request(url: str) -> tuple[int, dict | None, str]:
+    """
+    Make a GET request to SonarQube.
+    Returns (http_status, parsed_json_or_None, error_message).
+    Auth: prefers SONAR_TOKEN (Basic); falls back to unauthenticated.
+    """
+    import urllib.request
+    import urllib.error
+    import base64
+
+    token = os.getenv("SONAR_TOKEN", "")
+    req = urllib.request.Request(url)
+    if token:
+        creds = base64.b64encode(f"{token}:".encode()).decode()
+        req.add_header("Authorization", f"Basic {creds}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status, json.loads(resp.read()), ""
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode()[:300]
+        except Exception:
+            body = ""
+        return e.code, None, f"HTTP {e.code} {e.reason}: {body}"
+    except Exception as e:
+        return 0, None, str(e)
+
+
 # ── Tools ─────────────────────────────────────────────────────────────────────
+
+@registry.tool(
+    description=(
+        "Verify that SonarQube is reachable and authenticated. "
+        "Pass sonar_component_key (e.g. 'CALMRun-x-iep-service'). "
+        "MUST be called before any other SonarQube tool. "
+        "Returns connection status, auth method used, and server version. "
+        "If this fails, stop and report the exact error to the user — do not proceed."
+    )
+)
+def verify_sonar_connection(sonar_component_key: str) -> dict:
+    sonar_base = os.getenv("SONAR_BASE_URL", "https://sonar.tools.sap")
+    token = os.getenv("SONAR_TOKEN", "")
+    auth_method = "token (SONAR_TOKEN)" if token else "unauthenticated"
+
+    # 1. Check server is reachable via /api/system/status
+    status_url = f"{sonar_base}/api/system/status"
+    code, data, err = _sonar_request(status_url)
+    if code == 0 or data is None:
+        return {
+            "connected": False,
+            "error": f"Cannot reach SonarQube at {sonar_base}: {err}",
+            "fix": (
+                "Check that SONAR_BASE_URL is correct and the server is reachable. "
+                "If on VPN-gated network, ensure VPN is connected."
+            ),
+        }
+
+    server_version = data.get("version", "unknown")
+    server_status = data.get("status", "unknown")
+
+    # 2. Check auth by hitting a lightweight authenticated endpoint
+    auth_url = f"{sonar_base}/api/authentication/validate"
+    auth_code, auth_data, auth_err = _sonar_request(auth_url)
+    auth_valid = auth_data.get("valid", False) if auth_data else False
+
+    if not auth_valid:
+        hint = (
+            "Set SONAR_TOKEN in your .env file. "
+            "Generate a token at: "
+            f"{sonar_base}/account/security"
+        )
+        return {
+            "connected": True,
+            "authenticated": False,
+            "server_version": server_version,
+            "server_status": server_status,
+            "auth_method": auth_method,
+            "error": f"Authentication failed ({auth_code}): {auth_err or 'token invalid or missing'}",
+            "fix": hint,
+        }
+
+    # 3. Verify component key exists
+    component_url = (
+        f"{sonar_base}/api/components/show"
+        f"?component={sonar_component_key}"
+    )
+    comp_code, comp_data, comp_err = _sonar_request(component_url)
+
+    if comp_code != 200 or comp_data is None:
+        return {
+            "connected": True,
+            "authenticated": True,
+            "server_version": server_version,
+            "component_found": False,
+            "error": f"Component '{sonar_component_key}' not found ({comp_code}): {comp_err}",
+            "fix": (
+                f"Double-check the sonar_component_key. "
+                f"Browse {sonar_base}/projects to find the correct key."
+            ),
+        }
+
+    component_name = comp_data.get("component", {}).get("name", sonar_component_key)
+
+    return {
+        "connected": True,
+        "authenticated": True,
+        "auth_method": auth_method,
+        "server_version": server_version,
+        "server_status": server_status,
+        "component_found": True,
+        "component_name": component_name,
+        "component_key": sonar_component_key,
+        "sonar_base_url": sonar_base,
+        "message": "SonarQube connection verified. Ready to fetch issues and coverage data.",
+    }
+
 
 @registry.tool(
     description=(
@@ -95,11 +213,7 @@ def fetch_pr_diff(repo: str, pr_number: int) -> dict:
     )
 )
 def fetch_sonar_issues(sonar_component_key: str, pr_number: int) -> dict:
-    import urllib.request
-    import urllib.error
-
     sonar_base = os.getenv("SONAR_BASE_URL", "https://sonar.tools.sap")
-    token = os.getenv("SONAR_TOKEN", "")
 
     url = (
         f"{sonar_base}/api/issues/search"
@@ -108,19 +222,9 @@ def fetch_sonar_issues(sonar_component_key: str, pr_number: int) -> dict:
         f"&issueStatuses=OPEN,CONFIRMED&ps=100"
     )
 
-    req = urllib.request.Request(url)
-    if token:
-        import base64
-        creds = base64.b64encode(f"{token}:".encode()).decode()
-        req.add_header("Authorization", f"Basic {creds}")
-
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        return {"error": f"SonarQube HTTP {e.code}: {e.reason}. Set SONAR_TOKEN if auth is needed."}
-    except Exception as e:
-        return {"error": str(e)}
+    code, data, err = _sonar_request(url)
+    if data is None:
+        return {"error": f"SonarQube issues fetch failed: {err}"}
 
     issues = data.get("issues", [])
     summarised = [
@@ -167,12 +271,7 @@ def fetch_uncovered_lines(
     from_line: int,
     to_line: int,
 ) -> dict:
-    import urllib.request
-    import urllib.error
-    import base64
-
     sonar_base = os.getenv("SONAR_BASE_URL", "https://sonar.tools.sap")
-    token = os.getenv("SONAR_TOKEN", "")
 
     url = (
         f"{sonar_base}/api/sources/lines"
@@ -181,18 +280,9 @@ def fetch_uncovered_lines(
         f"&from={from_line}&to={to_line}"
     )
 
-    req = urllib.request.Request(url)
-    if token:
-        creds = base64.b64encode(f"{token}:".encode()).decode()
-        req.add_header("Authorization", f"Basic {creds}")
-
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        return {"error": f"SonarQube HTTP {e.code}: {e.reason}"}
-    except Exception as e:
-        return {"error": str(e)}
+    code, data, err = _sonar_request(url)
+    if data is None:
+        return {"error": f"SonarQube sources fetch failed: {err}"}
 
     lines = data.get("sources", data.get("lines", []))
     uncovered = [
